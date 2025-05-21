@@ -1,0 +1,222 @@
+/* ProjectDetailPage.css */
+
+.project-detail-page {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.project-content-container {
+  display: flex;
+  flex: 1;
+  position: relative;
+}
+
+.main-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.view-controls {
+  display: flex;
+  align-items: center;
+}
+
+.diagram-view, .list-view {
+  flex: 1;
+  overflow: auto;
+  margin-bottom: var(--space-4);
+}
+
+.agent-chat {
+  min-height: 250px;
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-4);
+  min-height: 150px;
+}
+
+.agent-message {
+  display: flex;
+  margin-bottom: var(--space-4);
+}
+
+.agent-icon {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  margin-right: var(--space-2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-primary-light);
+  border-radius: 50%;
+}
+
+.message-content {
+  background: var(--color-bg-secondary);
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  max-width: calc(100% - 40px);
+  overflow-x: auto;
+}
+
+.message-content pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  font-family: inherit;
+  font-size: inherit;
+}
+
+.chat-input-container {
+  display: flex;
+  width: 100%;
+  gap: var(--space-2);
+}
+
+.chat-input {
+  flex: 1;
+  resize: none;
+  padding: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.send-button {
+  align-self: flex-end;
+}
+
+.element-type-tabs {
+  display: flex;
+  margin-top: var(--space-2);
+  overflow-x: auto;
+  padding-bottom: var(--space-2);
+}
+
+.tab-button {
+  padding: var(--space-2) var(--space-4);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+
+.tab-button.active {
+  border-bottom-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.activity-popup {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 350px;
+  max-height: 500px;
+  background: var(--color-bg-primary);
+  box-shadow: var(--shadow-lg);
+  border-radius: var(--radius-lg);
+  display: flex;
+  flex-direction: column;
+  z-index: 100;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+}
+
+.activity-popup-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+  background-color: var(--color-bg-secondary);
+}
+
+.activity-popup-header h3 {
+  margin: 0;
+  font-size: var(--text-base);
+  font-weight: 600;
+}
+
+.close-button {
+  background: none;
+  border: none;
+  font-size: 1.5rem;
+  cursor: pointer;
+  color: var(--color-text-tertiary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  line-height: 1;
+}
+
+.close-button:hover {
+  color: var(--color-text-primary);
+}
+
+.activity-popup-content {
+  flex: 1;
+  overflow: auto;
+  padding: 0;
+}
+
+.empty-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 200px;
+  background: var(--color-bg-secondary);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  text-align: center;
+  color: var(--color-text-tertiary);
+}
+
+.connected-indicator {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-left: var(--space-2);
+  background-color: var(--color-success);
+}
+
+/* Responsive adaptations */
+@media (max-width: 768px) {
+  .activity-popup {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 90%;
+    max-width: 350px;
+    height: 80%;
+    max-height: 500px;
+  }
+  
+  .view-controls {
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+  
+  .element-type-tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scroll-snap-type: x mandatory;
+  }
+  
+  .tab-button {
+    scroll-snap-align: start;
+  }
+}
