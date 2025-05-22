@@ -1,7 +1,8 @@
 import os
 import openai
 import asyncio
-from typing import Optional, Dict, Any, Union, Callable
+import re # Added for parse_clarification_response
+from typing import Optional, Dict, Any, Union, Callable, List, Literal # Added List, Literal
 from dotenv import load_dotenv
 from sqlalchemy.orm import Session
 import models
@@ -10,6 +11,91 @@ from models import AIEventTypeEnum
 
 # Load environment variables from .env file if present
 load_dotenv()
+
+def parse_clarification_response(response_text: str) -> Union[Literal["CLEAR"], List[str]]:
+    # Parses the AI's response. If it's "CLEAR", returns "CLEAR".
+    # Otherwise, it extracts questions.
+    # Example: Response might be "CLEAR" or "Q1: What is X?
+# Q2: How about Y?"
+    if response_text.strip().upper() == "CLEAR":
+        return "CLEAR"
+    
+    questions = []
+    # Basic parsing: split by newline, filter out empty.
+    # More robust parsing might be needed based on AI's output format.
+    for line in response_text.splitlines():
+        if line.strip() and re.match(r"^(Q\d+[:\.\-]?\s*|[\*\-]\s+)", line.strip(), re.IGNORECASE):
+            questions.append(re.sub(r"^(Q\d+[:\.\-]?\s*|[\*\-]\s+)", "", line.strip()))
+        elif line.strip(): # if no specific prefix, but line is not empty, consider it a question
+            questions.append(line.strip())
+    return questions if questions else "CLEAR" # if parsing fails to find questions but not CLEAR, assume clear.
+
+
+def clarify_prompt_with_agent(
+    initial_prompt: str,
+    project_context: str, # This would be synthesized as it is for GenerateMermaidAgent
+    db: Optional[Session] = None, # db is not used in the provided snippet, but kept for consistency
+    project_id: Optional[int] = None, # project_id is not used, kept for consistency
+    active_session: Optional[AsyncAIActivitySessionManager] = None
+) -> Union[Literal["CLEAR"], List[str]]: # Returns "CLEAR" or a list of question strings
+    
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        if active_session:
+             # Log error if session available
+            asyncio.run(active_session.add_event(
+                "ClarificationAgent", AIEventTypeEnum.ERROR, "Error: OPENAI_API_KEY environment variable not set", {}))
+        return ["Error: OPENAI_API_KEY environment variable not set"]
+
+    client = openai.OpenAI(api_key=api_key)
+    
+    clarification_agent_role = "ClarificationAgent"
+    system_message = (
+        f"You are a {clarification_agent_role} for requirements engineering. "
+        "Your task is to analyze the user's request and project context. "
+        "If the request is clear and sufficient for processing, respond with the single word 'CLEAR'. "
+        "Otherwise, formulate 1-3 specific questions for the user to resolve ambiguities or gather missing critical details. "
+        "Phrase questions clearly. Do not ask for information already present in the context if substantial. "
+        "Prefix each question with 'Qn: ' (e.g., 'Q1: Question text?'). If only one question, you can omit the prefix."
+    )
+    
+    full_prompt_for_clarification = (
+        f"User Request: \"{initial_prompt}\"\n\n"
+        f"Project Context:\n{project_context}\n\n"
+        "Based on the request and context, are there any clarifying questions needed? "
+        "If clear, respond 'CLEAR'. Otherwise, list the questions."
+    )
+
+    # Log start, prompt for clarification agent (if session is available)
+    if active_session:
+        asyncio.run(active_session.add_event(
+            clarification_agent_role, AIEventTypeEnum.START, "Starting clarification phase", {}))
+        asyncio.run(active_session.add_event(
+            clarification_agent_role, AIEventTypeEnum.PROMPT, full_prompt_for_clarification, {}))
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o", # Or a faster/cheaper model if suitable for clarification
+            messages=[
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": full_prompt_for_clarification}
+            ],
+            temperature=0.3, # Lower temperature for more deterministic clarification
+            max_tokens=300
+        )
+        ai_response_text = response.choices[0].message.content.strip()
+
+        if active_session:
+            asyncio.run(active_session.add_event(
+                clarification_agent_role, AIEventTypeEnum.RESPONSE, ai_response_text, {}))
+
+        return parse_clarification_response(ai_response_text)
+
+    except Exception as e:
+        if active_session:
+            asyncio.run(active_session.add_event(
+                clarification_agent_role, AIEventTypeEnum.ERROR, str(e), {}))
+        return [f"Error during clarification: {str(e)}"] # Return error as a list of questions
 
 def run_agent(
     role: str, 

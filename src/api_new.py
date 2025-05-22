@@ -1,15 +1,23 @@
 from fastapi import FastAPI, HTTPException, Body, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional # Ensure Dict and Any are imported
 from datetime import datetime
 import re
-import uuid
+import uuid # For conversation_id
 
 import models
 import schemas
 import database
 from models import get_db, init_db
+from schemas import (
+    AIClarificationQuestion, AIProcessingResponse, 
+    AIClarificationResponse, AIGenericResult, AISuccessResponse, 
+    AgentResponseType, # This might be complex for endpoint return type hint, consider Any or a wrapper
+    AISubmitAnswersRequest, AIClarificationAnswer
+)
+from utils import clarify_prompt_with_agent, run_agent_async, run_agent # Assuming run_agent_async exists or adapt run_agent
+from shared_state import conversation_store # Import the shared conversation store
 
 # Initialize FastAPI app
 app = FastAPI(title="BA-Copilot API", description="API for Business Analysis Copilot")
@@ -228,50 +236,179 @@ async def create_diagram(
     )
 
 # Agent endpoints
-@app.post("/agents/generate_mermaid", tags=["Agents"])
-async def generate_mermaid_diagram(data: schemas.GenerateMermaidRequest, db: Session = Depends(get_db)):
-    """
-    Generate a Mermaid mindmap diagram based on the project context and objective.
-    This endpoint uses an AI agent to create a functional mapping diagram for the project.
-    """
+@app.post("/agents/generate_mermaid", response_model=Any, tags=["Agents"]) # Changed response_model to Any for now due to Union
+async def generate_mermaid_diagram_conversation(
+    data: schemas.GenerateMermaidRequest, 
+    db: Session = Depends(get_db)
+):
     project_id = data.project_id
-    objective = data.objective
-    
-    if project_id is None:
-        raise HTTPException(status_code=400, detail="project_id est requis")
-    
-    # Vérifier que le projet existe
+    objective = data.objective # This is the user's initial prompt
+
     db_project = database.get_project(db, project_id)
     if db_project is None:
         raise HTTPException(status_code=404, detail="Project not found")
-    
-    # Synthétiser le contexte du projet
-    context = synthesize_project_context(db, project_id)
-    
-    # Composer le prompt
-    prompt = f"""
-Objectif: {objective}
+
+    # Synthesize project context (ensure this function is defined in your database.py or equivalent)
+    project_context = synthesize_project_context(db, project_id) 
+
+    # Conceptual: active_session = start_ai_activity_session(db, project_id, "ClarifyAndGenerateMermaid")
+    # For now, active_session handling is conceptual. clarify_prompt_with_agent and run_agent_async
+    # might handle their own session logging if db and project_id are passed.
+
+    clarification_result = clarify_prompt_with_agent(
+        initial_prompt=objective,
+        project_context=project_context,
+        db=db, 
+        project_id=project_id
+        # active_session=active_session # Pass the session if managed here
+    )
+
+    if clarification_result != "CLEAR":
+        # Questions were returned
+        conversation_id = str(uuid.uuid4())
+        conversation_store[conversation_id] = {
+            "original_prompt": objective,
+            "project_context": project_context,
+            "project_id": project_id,
+            "agent_type": "GenerateMermaidAgent"
+        }
+        
+        questions_structured = [
+            AIClarificationQuestion(question_id=f"q{i+1}", text=q_text) 
+            for i, q_text in enumerate(clarification_result) # clarification_result is List[str] here
+        ]
+
+        # Conceptual: log_questions_to_activity(active_session, questions_structured)
+        # Conceptual: update_ai_activity_status(active_session, "AWAITING_USER_INPUT")
+
+        return AIClarificationResponse(
+            status="clarification_needed",
+            questions=questions_structured,
+            conversation_id=conversation_id
+            # activity_session_id=active_session.session_id if active_session else None
+        )
+    else:
+        # Prompt is clear, proceed to generate Mermaid diagram
+        # Conceptual: log_clarity_confirmed(active_session)
+        
+        full_prompt_for_mermaid = f"""Objectif: {objective}
 
 Contexte du projet:
-{context}
+{project_context}
 
 Générer un diagramme Mermaid mindmap représentant la cartographie fonctionnelle du projet.
 """
-    
-    # Appeler l'agent IA
-    from utils import run_agent
-    response = run_agent("GenerateMermaidAgent", prompt)
-    
-    # Extraire le diagramme Mermaid de la réponse
-    mermaid_code = extract_mermaid_code(response)
-    
-    # Créer le diagramme en base de données si valide
-    if mermaid_code and "mindmap" in mermaid_code:
-        diagram, elements = database.process_mermaid_diagram(db, project_id, mermaid_code, objective)
+        # Assuming run_agent_async is available and works similarly to run_agent but async
+        # If run_agent_async is not fully implemented for async session management,
+        # this part may need adjustment or use synchronous run_agent.
+        # For the purpose of this subtask, we use await assuming run_agent_async is async.
+        mermaid_response_text = await run_agent_async( 
+            role="GenerateMermaidAgent",
+            prompt=full_prompt_for_mermaid,
+            db=db,
+            project_id=project_id
+            # active_session=active_session
+        )
         
-        return {"mermaid": mermaid_code}
+        mermaid_code = extract_mermaid_code(mermaid_response_text) 
+
+        if mermaid_code and "mindmap" in mermaid_code:
+            database.process_mermaid_diagram(db, project_id, mermaid_code, objective)
+            # Conceptual: log_success(active_session)
+            # Conceptual: complete_ai_activity_session(active_session)
+            return AISuccessResponse(
+                status="success",
+                result=AIGenericResult(content_type="mermaid", data=mermaid_code)
+                # activity_session_id=active_session.session_id if active_session else None
+            )
+        else:
+            # Conceptual: log_error(active_session, "Failed to generate valid Mermaid")
+            # Conceptual: complete_ai_activity_session(active_session, status="ERROR")
+            raise HTTPException(status_code=500, detail="Failed to generate valid Mermaid diagram after clarification.")
+
+@app.post("/agents/submit_answers", response_model=Any, tags=["Agents"]) # Changed response_model to Any
+async def submit_answers_and_generate(
+    data: AISubmitAnswersRequest,
+    db: Session = Depends(get_db)
+):
+    conversation_id = data.conversation_id
+    user_answers = data.answers
+    
+    stored_context = conversation_store.pop(conversation_id, None)
+    if not stored_context:
+        raise HTTPException(status_code=404, detail="Conversation not found or already processed.")
+
+    original_prompt = stored_context["original_prompt"]
+    project_context = stored_context["project_context"]
+    project_id = stored_context["project_id"]
+    agent_type = stored_context["agent_type"]
+
+    answers_formatted = "\n".join([f"- Answer to '{ans.answer_id}': {ans.text}" for ans in user_answers])
+    refined_prompt = (
+        f"Original Request: \"{original_prompt}\"\n\n"
+        f"User provided the following clarifications:\n{answers_formatted}\n\n"
+        f"Project Context:\n{project_context}\n\n"
+        f"Based on all the above, please now proceed with the original request to generate the diagram/specification." # Made prompt more generic
+    )
+
+    # Conceptual: Start or continue AI Activity Session for the generation part
+    # active_session = start_or_get_ai_activity_session(...)
+    # log_refined_prompt(active_session, refined_prompt)
+
+    if agent_type == "GenerateMermaidAgent":
+        mermaid_response_text = await run_agent_async( 
+            role="GenerateMermaidAgent",
+            prompt=refined_prompt,
+            db=db,
+            project_id=project_id
+            # active_session=active_session
+        )
+        mermaid_code = extract_mermaid_code(mermaid_response_text)
+
+        if mermaid_code and "mindmap" in mermaid_code:
+            database.process_mermaid_diagram(db, project_id, mermaid_code, original_prompt) 
+            # Conceptual: log_success(active_session)
+            # Conceptual: complete_ai_activity_session(active_session)
+            return AISuccessResponse(
+                status="success",
+                result=AIGenericResult(content_type="mermaid", data=mermaid_code)
+            )
+        else:
+            # Conceptual: log_error(...)
+            raise HTTPException(status_code=500, detail="Failed to generate Mermaid diagram even after answers.")
+    elif agent_type == "GenerateAgent": 
+        # This part is illustrative for when we modify a similar endpoint for general specifications
+        spec_response_text = await run_agent_async(
+            role="GenerateAgent", # A generic agent for specifications
+            prompt=refined_prompt,
+            db=db,
+            project_id=project_id
+            # active_session=active_session
+        )
+        # Here you would typically parse spec_response_text to extract structured elements (Epics, Features, etc.)
+        # and save them to the database, similar to how process_mermaid_diagram works.
+        # For this example, we just return the raw text.
+        # database.process_specification(db, project_id, spec_response_text, original_prompt) # Hypothetical function
+        return AISuccessResponse(
+            status="success",
+            result=AIGenericResult(content_type="specification", data=spec_response_text)
+             # elements_extracted and elements_info could be populated here after processing
+        )
+    elif agent_type == "GenerateAgentSimplified":
+        spec_response_text = await run_agent_async(
+            role="GenerateAgent", # The underlying AI role is still "GenerateAgent"
+            prompt=refined_prompt,
+            db=db,
+            project_id=project_id
+            # active_session=active_session # Pass session if used
+        )
+        return AISuccessResponse(
+            status="success",
+            result=AIGenericResult(content_type="text", data=spec_response_text)
+        )
     else:
-        return {"mermaid": "Erreur: Aucun diagramme Mermaid n'a pu être généré."}
+        # Conceptual: log_error(...)
+        raise HTTPException(status_code=500, detail=f"Unknown agent type: {agent_type}")
 
 @app.post("/nodes/update", tags=["Elements"])
 async def update_node(data: schemas.NodeUpdate, db: Session = Depends(get_db)):
@@ -399,9 +536,9 @@ def synthesize_project_context(db: Session, project_id: int):
     elements = database.get_elements_by_project(db, project_id)
     
     # Organize elements by type
-    elements_by_type = {}
+    elements_by_type: Dict[str, List[models.Element]] = {} # Added type hint for clarity
     for element in elements:
-        if element.type.value not in elements_by_type:
+        if element.type.value not in elements_by_type: # Ensure element.type is ElementTypeEnum
             elements_by_type[element.type.value] = []
         elements_by_type[element.type.value].append(element)
     
@@ -463,14 +600,22 @@ def extract_mermaid_code(response):
             return "mindmap\n" + matches.group(1).strip()
         
         # Cas 3: Si la réponse commence directement par "mindmap" ou contient majoritairement du code Mermaid
-        if response.strip().startswith("mindmap") or "mindmap" in response and "root" in response:
+        # Ensure 'mindmap' is a keyword that guarantees it's a mermaid diagram
+        if response.strip().startswith("mindmap") or ("mindmap" in response and "root" in response): # Added check for "root" for mindmaps
             # Nettoyer les éventuels préfixes/suffixes de texte
             lines = response.split("\n")
-            start_idx = next((i for i, line in enumerate(lines) if line.strip().startswith("mindmap")), 0)
+            # Find the line that actually starts the mindmap content
+            start_idx = 0
+            for i, line in enumerate(lines):
+                if line.strip().lower().startswith("mindmap"): # Use lower() for case-insensitivity
+                    start_idx = i
+                    break
             return "\n".join(lines[start_idx:]).strip()
-    
-    # Si aucun code Mermaid n'est trouvé, retourner un message d'erreur
-    return "Erreur: Aucun diagramme Mermaid n'a pu être généré."
+            
+    # If no code block is found, and it's not starting with mindmap, return error or the response itself if it might be valid
+    # For this implementation, returning an error string is safer if expecting a block.
+    return "Erreur: Aucun diagramme Mermaid n'a pu être généré ou le format n'est pas reconnu."
+
 
 # Ensure this is the last part of the file
 if __name__ == "__main__":

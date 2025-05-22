@@ -1,4 +1,4 @@
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union, Literal
 from pydantic import BaseModel
 from datetime import datetime
 from enum import Enum
@@ -126,6 +126,46 @@ class AIEventBase(BaseModel):
     event_type: str
     content: str
     event_data: Optional[Dict[str, Any]] = None  # Renommé de metadata
+
+# Schemas for Conversational AI Flow
+
+class AIClarificationQuestion(BaseModel):
+    question_id: str # e.g., "q1", "q2"
+    text: str
+
+class AIProcessingResponse(BaseModel):
+    status: Literal["processing"]
+    message: str
+    activity_session_id: Optional[int] = None
+
+class AIClarificationResponse(BaseModel):
+    status: Literal["clarification_needed"]
+    questions: List[AIClarificationQuestion]
+    conversation_id: str # A temporary ID to track this Q&A exchange
+    activity_session_id: Optional[int] = None
+
+class AIGenericResult(BaseModel):
+    content_type: str # e.g., "mermaid", "specification", "text"
+    data: Any # The actual generated content
+
+class AISuccessResponse(BaseModel):
+    status: Literal["success"]
+    result: AIGenericResult
+    activity_session_id: Optional[int] = None
+    elements_extracted: Optional[int] = None
+    elements_info: Optional[str] = None
+
+AgentResponseType = Union[AIProcessingResponse, AIClarificationResponse, AISuccessResponse]
+
+class AIClarificationAnswer(BaseModel):
+    answer_id: str # Corresponds to question_id
+    text: str
+
+class AISubmitAnswersRequest(BaseModel):
+    conversation_id: str
+    answers: List[AIClarificationAnswer]
+    project_id: int # To maintain context
+    original_prompt: str # The very first prompt from the user for this task
 
 class AIEventCreate(AIEventBase):
     pass

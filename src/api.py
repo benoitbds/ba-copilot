@@ -10,10 +10,21 @@ import os
 import uuid
 import asyncio
 import httpx
-import schemas
+# import schemas # Will use ba_schemas alias for main schemas
 import models
 import database
 from models import AIEventTypeEnum
+
+# New imports for conversational AI flow
+import uuid as py_uuid # Alias to avoid conflict with local 'uuid' if any
+from typing import Union, Literal # Added for new schemas
+# Depends is already imported from fastapi at the top
+from sqlalchemy.orm import Session as SQLSession # Alias to avoid type conflicts if Session is defined locally
+
+from shared_state import conversation_store # Import shared store
+import schemas as ba_schemas # Use an alias for the main schemas.py to avoid name clashes
+from utils import clarify_prompt_with_agent, run_agent_async, run_agent # run_agent for fallback
+from websocket import AsyncAIActivitySessionManager # For the generation part of the new endpoint
 
 # Initialize FastAPI app
 app = FastAPI(title="BA-Copilot API", description="API for Business Analysis Copilot")
@@ -971,406 +982,216 @@ async def add_ai_event(
     
     return db_event
 
-@app.post("/agents/generate")
-async def generate_content(data: Dict = Body(...)):
+# --- START OF HELPER FUNCTION FOR ELEMENT EXTRACTION (defined locally in api.py) ---
+async def _internal_extract_and_save_elements_in_api_py(db: SQLSession, project_id: int, spec_text: str, original_prompt: str):
     """
-    Générer du contenu avec l'agent IA.
-    Crée une session d'activité IA pour suivre le processus en temps réel.
+    Helper function to encapsulate the element extraction logic.
+    Uses models.ElementTypeEnum and models.StatusEnum for database operations.
     """
-    prompt = data.get("prompt", "")
-    project_id = data.get("project_id")
+    elements_extracted_count = 0
+    elements_info_str = "Aucun élément n'a pu être extrait." # Default message
     
-    # Version asynchrone avec suivi des événements
-    if DB_ENABLED:
-        db = next(get_db())
-        try:
-            # On utilise la version asynchrone qui enregistre les événements
-            from utils import run_agent_async
+    try:
+        def extract_description(text, start_index):
+            lines = text[start_index:].split('\n')
+            description_lines = []
+            for line in lines:
+                if re.match(r'^#+ ', line) or re.match(r'^\s*(?:[-*•]|\d+\.)\s+', line): # Stop at next heading or list item
+                    break
+                if line.strip():
+                    description_lines.append(line.strip())
+            return ' '.join(description_lines)
+
+        element_hierarchy_levels = {
+            models.ElementTypeEnum.EPIC: 1, models.ElementTypeEnum.FEATURE: 2,
+            models.ElementTypeEnum.STORY: 3, models.ElementTypeEnum.USECASE: 4,
+            models.ElementTypeEnum.REQUIREMENT: 5
+        }
+        last_element_id_at_level = {level: None for level in range(1, 6)}
+
+        elements_extracted_objects = [] 
+        element_count_by_type = {
+            et.value: 0 for et in models.ElementTypeEnum if et.value != models.ElementTypeEnum.ROOT.value
+        }
+        
+        categories = ["Epic", "Feature", "Story", "User Story", "Use Case", "Requirement"]
+        element_type_mapping = { 
+            "Epic": models.ElementTypeEnum.EPIC, "Feature": models.ElementTypeEnum.FEATURE,
+            "Story": models.ElementTypeEnum.STORY, "User Story": models.ElementTypeEnum.STORY,
+            "Use Case": models.ElementTypeEnum.USECASE, "Requirement": models.ElementTypeEnum.REQUIREMENT
+        }
+
+        # Combined regex patterns for efficiency, ensure re module is imported (it is at the top)
+        # Pattern to capture: # Level, ## Level, ### Level, etc. up to 5 levels
+        # And also capture Category: Title format
+        # This regex tries to capture title and then description until next similar title or double newline
+        # It's complex and may need refinement based on exact AI output.
+        # Simplified for now, focusing on the structure. The original patterns are numerous.
+        # This example uses a more generic approach to find potential titles and descriptions.
+        
+        processed_titles_for_run = set() # To avoid double-counting from overlapping regexes if used
+
+        # Main pattern strategy: Header-based extraction
+        markdown_header_pattern = r"(?:^|\n)(#{1,5})\s*(" + "|".join(categories) + r")?[:\s]*([^\n]+?)(?=\n#{1,5}\s|[^\S\n]*\n[^\S\n]*\n|$)"
+        
+        matches = re.finditer(markdown_header_pattern, spec_text, re.IGNORECASE)
+        for match in matches:
+            hashes = match.group(1)
+            level = len(hashes)
+            category_in_title = match.group(2) # Optional category in title
+            title = match.group(3).strip()
+
+            if not title or title in processed_titles_for_run : continue
             
-            # Définir un titre significatif pour la session
-            title = "Génération de spécifications"
-            if len(prompt) > 30:
-                title = f"{title} : {prompt[:30]}..."
-            else:
-                title = f"{title} : {prompt}"
+            description = extract_description(spec_text, match.end())
+            processed_titles_for_run.add(title)
+
+            # Determine element type
+            current_db_element_type = None
+            if category_in_title:
+                current_db_element_type = element_type_mapping.get(category_in_title.replace("User Story", "Story").replace("Use Case", "Use Case")) # Normalize
             
-            # Crée une session d'activité et exécute l'agent
-            async def run_agent_with_activity():
-                from websocket import AsyncAIActivitySessionManager
-                
-                async with AsyncAIActivitySessionManager(
-                    db, 
-                    title, 
-                    "generate", 
-                    project_id,
-                    {"prompt_length": len(prompt)}
-                ) as session:
-                    # Ajouter un événement de démarrage
-                    await session.add_event(
-                        "System", 
-                        "start", 
-                        "Démarrage de la génération de spécifications"
-                    )
-                    
-                    # Exécuter l'agent
-                    spec = await run_agent_async(
-                        "GenerateAgent", 
-                        prompt, 
-                        db, 
-                        project_id, 
-                        session
-                    )
-                    
-                    # Ajouter un événement de fin
-                    await session.add_event(
-                        "System", 
-                        "complete", 
-                        "Génération de spécifications terminée"
-                    )
-                    
-                    return spec, session.session_id
+            if not current_db_element_type: # Infer from level or keywords if not in title
+                if level == 1: current_db_element_type = models.ElementTypeEnum.EPIC
+                elif level == 2: current_db_element_type = models.ElementTypeEnum.FEATURE
+                elif level == 3: current_db_element_type = models.ElementTypeEnum.STORY
+                elif level == 4: current_db_element_type = models.ElementTypeEnum.USECASE
+                elif level == 5: current_db_element_type = models.ElementTypeEnum.REQUIREMENT
+                else: current_db_element_type = models.ElementTypeEnum.REQUIREMENT # Default for deeper levels
+
+            element_count_by_type[current_db_element_type.value] += 1
+            custom_id = f"{current_db_element_type.value.capitalize()}-{element_count_by_type[current_db_element_type.value]}"
             
-            # Exécuter l'agent de manière asynchrone
-            # Ne pas utiliser asyncio.run() dans une fonction déjà async
-            spec, session_id = await run_agent_with_activity()
+            existing_element = db.query(models.Element).filter_by(project_id=project_id, title=title, type=current_db_element_type).first()
+            if not existing_element:
+                parent_db_id = None
+                current_model_level = element_hierarchy_levels.get(current_db_element_type, level) # Use markdown level if type level not mapped
+                if current_model_level > 1:
+                    parent_db_id = last_element_id_at_level.get(current_model_level - 1)
+                
+                element_db = database.create_element(
+                    db, project_id, custom_id, current_db_element_type, title,
+                    description=description or f"Généré: {original_prompt[:70]}...",
+                    status=models.StatusEnum.PENDING, parent_id=parent_db_id
+                )
+                elements_extracted_objects.append(element_db)
+                last_element_id_at_level[current_model_level] = element_db.id
+                for lvl_reset in range(current_model_level + 1, 6): last_element_id_at_level[lvl_reset] = None
+        
+        # Fallback for list items if no structured elements found via headers
+        if not elements_extracted_objects:
+            list_item_pattern = r"(?:^|\n)\s*[-*•]\s+([^\n]+)(?:\n((?:[ \t]+[^\n]+|\n)+))?"
+            matches = re.finditer(list_item_pattern, spec_text, re.IGNORECASE)
+            for match in matches:
+                title = match.group(1).strip()
+                # Description from indented lines after list item
+                desc_block = match.group(2)
+                description = ""
+                if desc_block:
+                    description = "\n".join([line.strip() for line in desc_block.strip().split('\n')])
+
+                if not title or title in processed_titles_for_run or len(title) > 150: continue
+                processed_titles_for_run.add(title)
+                
+                list_item_type = models.ElementTypeEnum.REQUIREMENT # Default for list items
+                element_count_by_type[list_item_type.value] += 1
+                custom_id = f"Req-list-{element_count_by_type[list_item_type.value]}"
+                if not db.query(models.Element).filter_by(project_id=project_id, title=title, type=list_item_type).first():
+                    element_db = database.create_element(db, project_id, custom_id, list_item_type, title, description=description or f"Généré (liste): {original_prompt[:70]}...")
+                    elements_extracted_objects.append(element_db)
+
+        elements_extracted_count = len(elements_extracted_objects)
+        if elements_extracted_count > 0:
+            counts_by_type = {
+                et_val.value: len([e for e in elements_extracted_objects if e.type == et_val]) 
+                for et_val in models.ElementTypeEnum 
+            }
+            details_list = [f"{count} {name.capitalize()}" for name, count in counts_by_type.items() if count > 0]
+            elements_info_str = f"{elements_extracted_count} éléments extraits et ajoutés ({', '.join(details_list)})."
+        
+    except Exception as e:
+        print(f"Erreur dans _internal_extract_and_save_elements_in_api_py: {str(e)}")
+        elements_info_str = f"Une erreur est survenue lors de l'extraction des éléments: {str(e)}"
+    
+    return elements_extracted_count, elements_info_str
+# --- END OF HELPER FUNCTION ---
+
+@app.post("/agents/generate", response_model=Any, tags=["Agents"]) # Original path, new logic
+async def generate_content_conversation( # Renamed function
+    data: Dict = Body(...), 
+    db: SQLSession = Depends(database.get_db) 
+):
+    user_prompt = data.get("prompt", "")
+    project_id = data.get("project_id")
+
+    if not DB_ENABLED:
+        spec_text_result = run_agent("GenerateAgent", user_prompt) 
+        return {"spec": spec_text_result} 
+
+    db_project = database.get_project(db, project_id)
+    if db_project is None: raise HTTPException(status_code=404, detail="Project not found")
+
+    project_context = database.synthesize_project_context(db, project_id)
+    
+    clarification_result = clarify_prompt_with_agent(
+        initial_prompt=user_prompt, project_context=project_context, db=db, project_id=project_id
+    )
+
+    if clarification_result != "CLEAR":
+        conversation_id = str(py_uuid.uuid4()) 
+        conversation_store[conversation_id] = { 
+            "original_prompt": user_prompt, "project_context": project_context,
+            "project_id": project_id, "agent_type": "GenerateAgent" 
+        }
+        questions_structured = [
+            ba_schemas.AIClarificationQuestion(question_id=f"q{i+1}", text=q_text) 
+            for i, q_text in enumerate(clarification_result)
+        ]
+        return ba_schemas.AIClarificationResponse(
+            status="clarification_needed", questions=questions_structured, conversation_id=conversation_id
+        )
+    else: 
+        session_title = f"Génération de spécifications : {user_prompt[:30]}..." if len(user_prompt) > 30 else f"Génération de spécifications : {user_prompt}"
+        
+        spec_text_result = ""
+        gen_activity_session_id = None
+        num_extracted = 0
+        info_extracted = "Aucun élément extrait."
+        
+        async with AsyncAIActivitySessionManager(
+            db, session_title, "generate_specification_content_api_py", project_id, {"prompt_length": len(user_prompt)}
+        ) as generation_session:
+            gen_activity_session_id = generation_session.session_id
+            await generation_session.add_event(
+                "System", AIEventTypeEnum.START, 
+                "Démarrage de la génération de spécifications (prompt jugé clair)"
+            )
             
-            # Analyser et extraire les éléments du projet depuis la spécification
-            # Et les sauvegarder dans la base de données
-            try:
-                import re
-                
-                # Amélioration: Fonction pour extraire la description d'un élément
-                def extract_description(text, start_index):
-                    lines = text[start_index:].split('\n')
-                    description_lines = []
-                    
-                    for line in lines:
-                        # Si on trouve un titre ou un nouveau point, on arrête
-                        if re.match(r'^#+ ', line) or re.match(r'^\s*(?:[-*•]|\d+\.)\s+', line):
-                            break
-                        # Sinon on ajoute la ligne à la description
-                        if line.strip():
-                            description_lines.append(line.strip())
-                    
-                    return ' '.join(description_lines)
-                
-                # Structure pour conserver les relations parent-enfant
-                element_hierarchy = {}
-                last_elements_by_level = {k: None for k in range(1, 6)}  # Niveau 1 à 5
-                
-                # Essayer d'extraire des catégories de type "Epic", "Feature", etc.
-                elements_extracted = []
-                element_count_by_type = {
-                    "epic": 0, 
-                    "feature": 0, 
-                    "story": 0, 
-                    "usecase": 0, 
-                    "requirement": 0
-                }
-                
-                # 1. Méthode 1: Extraire les titres avec Markdown (# Epic: ...)
-                categories = ["Epic", "Feature", "Story", "User Story", "Use Case", "Requirement"]
-                patterns = [
-                    # Format: # Epic: Title
-                    rf"(?:^|\n)#{1,3} *{category}[s]?[: ]+(.*?)(?=\n#|$)" 
-                    for category in categories
-                ]
-                
-                # 2. Méthode 2: Extraire les titres avec numérotation (1. Epic: ...)
-                patterns.extend([
-                    # Format: 1. Epic: Title
-                    rf"(?:^|\n)(?:\d+\.) *{category}[s]?[: ]+(.*?)(?=\n(?:\d+\.)|$)" 
-                    for category in categories
-                ])
-                
-                # 3. Méthode 3: Extraire les lignes avec typographie en gras (ex: **Epic**: Title)
-                patterns.extend([
-                    # Format: **Epic**: Title
-                    rf"(?:^|\n)[*_]{2}{category}[s]?[*_]{2}[: ]+(.*?)(?=\n[*_]{2}|$)" 
-                    for category in categories
-                ])
-                
-                # 3. Méthode 4: Extraire les lignes avec format standard (Epic: Title)
-                patterns.extend([
-                    # Format: Epic: Title
-                    rf"(?:^|\n)(?:\s*)(?<!#){category}[s]?[: ]+(.*?)(?=\n|$)" 
-                    for category in categories
-                ])
-                
-                # Extraire tous les éléments à partir des patterns définis
-                for pattern_index, pattern in enumerate(patterns):
-                    # Déterminer le type d'après le pattern
-                    category_index = pattern_index % len(categories)
-                    category = categories[category_index]
-                    element_type = None
-                    
-                    if category == "Epic":
-                        element_type = models.ElementTypeEnum.EPIC
-                    elif category == "Feature":
-                        element_type = models.ElementTypeEnum.FEATURE
-                    elif category in ["Story", "User Story"]:
-                        element_type = models.ElementTypeEnum.STORY
-                    elif category == "Use Case":
-                        element_type = models.ElementTypeEnum.USECASE
-                    elif category == "Requirement":
-                        element_type = models.ElementTypeEnum.REQUIREMENT
-                    
-                    if not element_type:
-                        continue
-                    
-                    # Chercher tous les matchs pour ce pattern
-                    matches = re.finditer(pattern, spec, re.MULTILINE | re.DOTALL)
-                    for match in matches:
-                        title = match.group(1).strip()
-                        if not title:
-                            continue
-                        
-                        # Extraire la description
-                        description = extract_description(spec, match.end())
-                        
-                        # Générer un ID basé sur le type et un compteur
-                        element_count_by_type[element_type.value] += 1
-                        count = element_count_by_type[element_type.value]
-                        
-                        # Générer des IDs structurés (Epic-1, Feature-1, etc.)
-                        custom_id = f"{element_type.value.capitalize()}-{count}"
-                        
-                        # Déterminer le parent en fonction du type d'élément
-                        parent_id = None
-                        
-                        # Créer l'élément
-                        try:
-                            # Vérifier si un élément avec ce titre existe déjà
-                            existing_elements = db.query(models.Element).filter(
-                                models.Element.project_id == project_id,
-                                models.Element.title == title
-                            ).all()
-                            
-                            if not existing_elements:
-                                # Créer un nouvel élément
-                                element = database.create_element(
-                                    db,
-                                    project_id,
-                                    custom_id,
-                                    element_type,
-                                    title,
-                                    description=description or f"Généré depuis le prompt: {prompt[:100]}...",
-                                    status=models.StatusEnum.PENDING,
-                                    parent_id=parent_id
-                                )
-                                elements_extracted.append(element)
-                                
-                                # Mettre à jour le dernier élément du niveau correspondant
-                                level = 1
-                                if element_type == models.ElementTypeEnum.FEATURE:
-                                    level = 2
-                                elif element_type == models.ElementTypeEnum.STORY:
-                                    level = 3
-                                elif element_type == models.ElementTypeEnum.USECASE:
-                                    level = 4
-                                elif element_type == models.ElementTypeEnum.REQUIREMENT:
-                                    level = 5
-                                
-                                last_elements_by_level[level] = element.id
-                                
-                                # Établir la relation parent-enfant
-                                if level > 1 and last_elements_by_level[level-1]:
-                                    # Mise à jour avec le parent
-                                    database.update_element(
-                                        db,
-                                        element.id,
-                                        parent_id=last_elements_by_level[level-1]
-                                    )
-                        except Exception as element_err:
-                            print(f"Erreur lors de la création de l'élément: {element_err}")
-                
-                # Si aucun élément n'a été extrait via les patterns précédents, essayer les listes à puces
-                if not elements_extracted:
-                    # 5. Méthode 5: Extraire les éléments d'une liste à puces
-                    list_patterns = [
-                        # Format: * Title
-                        r"(?:^|\n)(?:\s*)[-*•]\s+(.*?)(?=\n(?:\s*)[-*•]|$)",
-                        # Format: 1. Title
-                        r"(?:^|\n)(?:\s*)\d+\.\s+(.*?)(?=\n(?:\s*)\d+\.|$)"
-                    ]
-                    
-                    potential_elements = []
-                    
-                    # Extraire tous les éléments potentiels des listes
-                    for pattern in list_patterns:
-                        matches = re.finditer(pattern, spec, re.MULTILINE | re.DOTALL)
-                        for match in matches:
-                            title = match.group(1).strip()
-                            # Ignorer les titres trop longs (probablement des descriptions)
-                            if title and len(title) < 100:
-                                potential_elements.append({
-                                    "title": title,
-                                    "description": extract_description(spec, match.end())
-                                })
-                    
-                    # Analyser chaque élément pour déterminer son type
-                    for i, potential in enumerate(potential_elements):
-                        title = potential["title"]
-                        description = potential["description"]
-                        
-                        # Déterminer le type d'élément en analysant le contenu
-                        element_type = models.ElementTypeEnum.EPIC  # Par défaut
-                        
-                        # Essayer de déterminer le type en fonction des mots-clés dans le titre
-                        title_lower = title.lower()
-                        if any(kw in title_lower for kw in ["epic", "thème", "theme", "module"]):
-                            element_type = models.ElementTypeEnum.EPIC
-                        elif any(kw in title_lower for kw in ["feature", "fonctionnalité", "fonction"]):
-                            element_type = models.ElementTypeEnum.FEATURE
-                        elif any(kw in title_lower for kw in ["story", "user story", "récit"]):
-                            element_type = models.ElementTypeEnum.STORY
-                        elif any(kw in title_lower for kw in ["use case", "cas d'utilisation"]):
-                            element_type = models.ElementTypeEnum.USECASE
-                        elif any(kw in title_lower for kw in ["requirement", "exigence", "besoin"]):
-                            element_type = models.ElementTypeEnum.REQUIREMENT
-                        
-                        # Générer un ID
-                        element_count_by_type[element_type.value] += 1
-                        count = element_count_by_type[element_type.value]
-                        custom_id = f"{element_type.value.capitalize()}-{count}"
-                        
-                        try:
-                            # Vérifier si un élément avec ce titre existe déjà
-                            existing_elements = db.query(models.Element).filter(
-                                models.Element.project_id == project_id,
-                                models.Element.title == title
-                            ).all()
-                            
-                            if not existing_elements:
-                                element = database.create_element(
-                                    db,
-                                    project_id,
-                                    custom_id,
-                                    element_type,
-                                    title,
-                                    description=description or f"Généré depuis le prompt: {prompt[:100]}...",
-                                    status=models.StatusEnum.PENDING
-                                )
-                                elements_extracted.append(element)
-                        except Exception as element_err:
-                            print(f"Erreur lors de la création de l'élément: {element_err}")
-                
-                # Établir les relations hiérarchiques si elles n'ont pas déjà été mises en place
-                try:
-                    # Obtenir les éléments par type
-                    epics = [e for e in elements_extracted if e.type == models.ElementTypeEnum.EPIC]
-                    features = [e for e in elements_extracted if e.type == models.ElementTypeEnum.FEATURE]
-                    stories = [e for e in elements_extracted if e.type == models.ElementTypeEnum.STORY]
-                    usecases = [e for e in elements_extracted if e.type == models.ElementTypeEnum.USECASE]
-                    requirements = [e for e in elements_extracted if e.type == models.ElementTypeEnum.REQUIREMENT]
-                    
-                    # Fonction pour trouver l'élément parent le plus pertinent
-                    def find_best_parent(child, potential_parents):
-                        if not potential_parents:
-                            return None
-                        
-                        # Si un seul parent disponible, le choisir
-                        if len(potential_parents) == 1:
-                            return potential_parents[0]
-                        
-                        # Calculer le score de similarité en fonction du contenu
-                        best_score = -1
-                        best_parent = potential_parents[0]
-                        
-                        child_content = (child.title + " " + (child.description or "")).lower()
-                        
-                        for parent in potential_parents:
-                            parent_content = (parent.title + " " + (parent.description or "")).lower()
-                            
-                            # Score simple: nombre de mots communs
-                            child_words = set(child_content.split())
-                            parent_words = set(parent_content.split())
-                            common_words = len(child_words.intersection(parent_words))
-                            
-                            if common_words > best_score:
-                                best_score = common_words
-                                best_parent = parent
-                        
-                        return best_parent
-                    
-                    # Attribuer les features aux epics si elles n'ont pas de parent
-                    for feature in features:
-                        if feature.parent_id is None and epics:
-                            best_epic = find_best_parent(feature, epics)
-                            if best_epic:
-                                database.update_element(db, feature.id, parent_id=best_epic.id)
-                    
-                    # Attribuer les stories aux features si elles n'ont pas de parent
-                    for story in stories:
-                        if story.parent_id is None and features:
-                            best_feature = find_best_parent(story, features)
-                            if best_feature:
-                                database.update_element(db, story.id, parent_id=best_feature.id)
-                    
-                    # Faire de même pour les use cases et requirements
-                    for usecase in usecases:
-                        if usecase.parent_id is None and stories:
-                            best_story = find_best_parent(usecase, stories)
-                            if best_story:
-                                database.update_element(db, usecase.id, parent_id=best_story.id)
-                    
-                    for requirement in requirements:
-                        if requirement.parent_id is None and usecases:
-                            best_usecase = find_best_parent(requirement, usecases)
-                            if best_usecase:
-                                database.update_element(db, requirement.id, parent_id=best_usecase.id)
-                            # Si pas de use case approprié, essayer de rattacher à une story
-                            elif stories:
-                                best_story = find_best_parent(requirement, stories)
-                                if best_story:
-                                    database.update_element(db, requirement.id, parent_id=best_story.id)
-                except Exception as hierarchy_err:
-                    print(f"Erreur lors de l'établissement des relations hiérarchiques: {hierarchy_err}")
-                
-                # Préparer un message informant l'utilisateur des éléments extraits
-                num_elements = len(elements_extracted)
-                elements_info = ""
-                
-                if num_elements > 0:
-                    # Détailler les types d'éléments extraits
-                    elements_by_type = {
-                        "Epics": len([e for e in elements_extracted if e.type == models.ElementTypeEnum.EPIC]),
-                        "Features": len([e for e in elements_extracted if e.type == models.ElementTypeEnum.FEATURE]),
-                        "User Stories": len([e for e in elements_extracted if e.type == models.ElementTypeEnum.STORY]),
-                        "Use Cases": len([e for e in elements_extracted if e.type == models.ElementTypeEnum.USECASE]),
-                        "Requirements": len([e for e in elements_extracted if e.type == models.ElementTypeEnum.REQUIREMENT])
-                    }
-                    
-                    # Construire un message détaillé
-                    elements_info = f"{num_elements} éléments ont été extraits et ajoutés au projet"
-                    details = [f"{count} {name}" for name, count in elements_by_type.items() if count > 0]
-                    if details:
-                        elements_info += f" ({', '.join(details)})."
-                    else:
-                        elements_info += "."
-                
-                # Renvoyer le résultat avec l'ID de la session pour le suivi
-                return {
-                    "spec": spec,
-                    "activity_session_id": session_id,
-                    "elements_extracted": num_elements,
-                    "elements_info": elements_info
-                }
-            except Exception as extract_err:
-                print(f"Erreur lors de l'extraction des éléments: {extract_err}")
-                # En cas d'erreur, renvoyer simplement le résultat sans extraction
-                return {
-                    "spec": spec,
-                    "activity_session_id": session_id
-                }
-        except Exception as e:
-            print(f"Erreur lors de l'exécution de l'agent IA: {e}")
-            raise
-    else:
-        # Version synchrone sans suivi des événements (pour compatibilité)
-        from utils import run_agent
-        spec = run_agent("GenerateAgent", prompt)
-        return {"spec": spec}
+            spec_text_result = await run_agent_async( 
+                "GenerateAgent", user_prompt, db, project_id, generation_session 
+            )
+            
+            await generation_session.add_event(
+                "System", AIEventTypeEnum.INFO, 
+                "Génération de texte terminée, début de l'extraction des éléments."
+            )
+            
+            num_extracted, info_extracted = await _internal_extract_and_save_elements_in_api_py(
+                db, project_id, spec_text_result, user_prompt
+            )
+
+            await generation_session.add_event(
+                "System", AIEventTypeEnum.COMPLETE, 
+                f"Génération et extraction terminées. {info_extracted}"
+            )
+
+        return ba_schemas.AISuccessResponse( 
+            status="success",
+            result=ba_schemas.AIGenericResult(content_type="specification", data=spec_text_result),
+            activity_session_id=gen_activity_session_id,
+            elements_extracted=num_extracted,
+            elements_info=info_extracted
+        )
 
 @app.post("/agents/generate_mermaid")
 async def generate_mermaid_diagram(data: Dict = Body(...)):
