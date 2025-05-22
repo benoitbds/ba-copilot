@@ -39,6 +39,13 @@ function ProjectDetailPage({ project, onBack }: Props) {
   const [currentSessionId, setCurrentSessionId] = useState<number | null>(null);
   const [showActivityPopup, setShowActivityPopup] = useState(false);
   const activityPopupRef = useRef<HTMLDivElement>(null);
+
+  // New state variables for conversational AI flow
+  const [isAwaitingClarification, setIsAwaitingClarification] = useState<boolean>(false);
+  const [clarificationQuestions, setClarificationQuestions] = useState<Array<{ question_id: string; text: string }>>([]);
+  const [userAnswers, setUserAnswers] = useState<Record<string, string>>({}); // Store answers as { question_id: answer_text }
+  const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
+  const [originalUserPrompt, setOriginalUserPrompt] = useState<string | null>(null); // To store the prompt that started a conversation
   
   const API_URL = import.meta.env.VITE_API_URL || 'http://192.168.1.93:8000';
 
@@ -103,17 +110,18 @@ function ProjectDetailPage({ project, onBack }: Props) {
     setLoading(true);
     setError(null);
     setResult(null);
-    
-    // Réinitialiser l'ID de session AVANT d'ouvrir le popup pour éviter un problème d'état
-    setCurrentSessionId(null);
-    
-    // Montrer le popup d'activité avec un léger délai pour éviter les problèmes de rendu
-    setTimeout(() => {
-      setShowActivityPopup(true);
-    }, 10);
-    
+    setIsAwaitingClarification(false);
+    setClarificationQuestions([]);
+    setUserAnswers({});
+    setCurrentConversationId(null);
+    setOriginalUserPrompt(prompt); // Store the initial prompt
+
+    // Reset AI Activity Feed session ID before new operation
+    setCurrentSessionId(null); 
+    setTimeout(() => setShowActivityPopup(true), 10);
+
     try {
-      const res = await fetch(`${API_URL}/agents/generate`, {
+      const res = await fetch(`${API_URL}/agents/generate_text_conversation`, { // New endpoint
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt, project_id: project.id }),
@@ -121,33 +129,30 @@ function ProjectDetailPage({ project, onBack }: Props) {
       
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
-      setResult(data);
-      
-      // Si l'API renvoie un ID de session d'activité, le stocker
-      if (data.activity_session_id) {
-        // Mise à jour avec un léger délai pour éviter les problèmes de rendu
-        setTimeout(() => {
-          setCurrentSessionId(data.activity_session_id);
-        }, 10);
-        
-        // Si des éléments ont été extraits, rafraîchir la liste des éléments
-        if (data.elements_extracted && data.elements_extracted > 0) {
-          setRefreshElementsKey(prev => prev + 1);
-          
-          // Notification des éléments extraits
-          setResult({
-            ...data,
-            spec: `${data.spec}\n\n---\n\n**${data.elements_info}**\n\nCes éléments ont été automatiquement extraits et ajoutés au projet.`
-          });
-          
-          // Demander s'il faut régénérer le diagramme pour inclure les nouveaux éléments
-          if (confirm("Des éléments ont été extraits. Voulez-vous mettre à jour le diagramme pour les inclure?")) {
-            await generateDiagram("Inclure tous les éléments du projet");
-          }
-        }
+
+      if (data.status === "clarification_needed") {
+        setIsAwaitingClarification(true);
+        setClarificationQuestions(data.questions);
+        setCurrentConversationId(data.conversation_id);
+        // Optionally set currentSessionId for activity feed if clarification phase has one
+        if (data.activity_session_id) setCurrentSessionId(data.activity_session_id);
+        setPrompt(""); // Clear the input prompt
+      } else if (data.status === "success") {
+        setResult(data.result.data); // Assuming data.result.data holds the spec text
+        if (data.activity_session_id) setCurrentSessionId(data.activity_session_id);
+        // Elements extracted info is not expected from this simplified endpoint
+        setOriginalUserPrompt(null); // Clear stored prompt
+      } else if (data.status === "processing") {
+        // Handle processing state if backend sends it
+        setResult("AI is processing your request...");
+        if (data.activity_session_id) setCurrentSessionId(data.activity_session_id);
+      } else {
+        // Handle unexpected response
+        throw new Error("Unexpected response from AI service.");
       }
     } catch (e: any) {
       setError(e.message || 'Erreur lors de la génération.');
+      setOriginalUserPrompt(null);
     } finally {
       setLoading(false);
     }
@@ -159,43 +164,48 @@ function ProjectDetailPage({ project, onBack }: Props) {
   const generateDiagram = async (objective: string) => {
     setLoading(true);
     setError(null);
-    
-    // Réinitialiser l'ID de session AVANT d'ouvrir le popup pour éviter un problème d'état
+    setIsAwaitingClarification(false);
+    setClarificationQuestions([]);
+    setUserAnswers({});
+    setCurrentConversationId(null);
+    setOriginalUserPrompt(objective); // Store the initial objective
+
     setCurrentSessionId(null);
-    
-    // Montrer le popup d'activité avec un léger délai pour éviter les problèmes de rendu
-    setTimeout(() => {
-      setShowActivityPopup(true);
-    }, 10);
+    setTimeout(() => setShowActivityPopup(true), 10);
     
     try {
-      const res = await fetch(`${API_URL}/agents/generate_mermaid`, {
+      const res = await fetch(`${API_URL}/agents/generate_mermaid`, { // This endpoint is already conversational
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          project_id: project.id,
-          objective: objective 
-        }),
+        body: JSON.stringify({ project_id: project.id, objective: objective }),
       });
       
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
-      
-      if (data.mermaid) {
-        setMermaidCode(data.mermaid);
-        setRefreshElementsKey(prev => prev + 1);
-        
-        if (data.activity_session_id) {
-          // Mise à jour avec un léger délai pour éviter les problèmes de rendu
-          setTimeout(() => {
-            setCurrentSessionId(data.activity_session_id);
-          }, 10);
+
+      if (data.status === "clarification_needed") {
+        setIsAwaitingClarification(true);
+        setClarificationQuestions(data.questions);
+        setCurrentConversationId(data.conversation_id);
+        if (data.activity_session_id) setCurrentSessionId(data.activity_session_id);
+      } else if (data.status === "success") {
+        if (data.result.content_type === "mermaid" && data.result.data) {
+          setMermaidCode(data.result.data);
+          setRefreshElementsKey(prev => prev + 1); // If elements might have changed
+        } else {
+          throw new Error("Invalid diagram data received.");
         }
+        if (data.activity_session_id) setCurrentSessionId(data.activity_session_id);
+        setOriginalUserPrompt(null);
+      } else if (data.status === "processing") {
+        setResult("AI is processing your diagram request..."); // Or a specific diagram loading message
+        if (data.activity_session_id) setCurrentSessionId(data.activity_session_id);
       } else {
-        throw new Error("Le diagramme n'a pas pu être généré");
+        throw new Error("Unexpected response from AI diagram service.");
       }
     } catch (e: any) {
       setError(e.message || 'Erreur de génération du diagramme.');
+      setOriginalUserPrompt(null);
     } finally {
       setLoading(false);
     }
@@ -257,6 +267,72 @@ function ProjectDetailPage({ project, onBack }: Props) {
    */
   const handleElementTypeChange = (type: ElementType) => {
     setActiveElementType(type);
+  };
+
+  const handleAnswerChange = (question_id: string, answer_text: string) => {
+    setUserAnswers(prev => ({ ...prev, [question_id]: answer_text }));
+  };
+
+  const handleSubmitAnswers = async () => {
+    if (!currentConversationId || !originalUserPrompt) {
+      setError("Erreur: Contexte de conversation perdu.");
+      return;
+    }
+
+    const answersPayload = clarificationQuestions.map(q => ({
+      answer_id: q.question_id,
+      text: userAnswers[q.question_id] || "" // Send empty string if no answer
+    }));
+
+    setLoading(true);
+    setError(null);
+    // Optionally, update AI Activity Feed for this new step
+    // setCurrentSessionId(null); // Or use a new session for this part
+    // setTimeout(() => setShowActivityPopup(true), 10);
+
+
+    try {
+      const res = await fetch(`${API_URL}/agents/submit_answers`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          conversation_id: currentConversationId,
+          answers: answersPayload,
+          project_id: project.id,
+          original_prompt: originalUserPrompt 
+        }),
+      });
+
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+
+      if (data.status === "success") {
+        // Determine if it was a diagram or spec based on originalUserPrompt or a stored type
+        // For now, assume if mermaidCode was being generated, it's a diagram.
+        // A more robust way would be to store the 'agent_type' on the frontend too.
+        if (data.result.content_type === "mermaid") {
+          setMermaidCode(data.result.data);
+          setRefreshElementsKey(prev => prev + 1);
+        } else { // Assuming 'text' or 'specification'
+          setResult(data.result.data);
+        }
+        if (data.activity_session_id) setCurrentSessionId(data.activity_session_id);
+      } else {
+        // It's possible submit_answers could also lead to more questions or processing state,
+        // but for now, let's assume it resolves to success or error.
+        throw new Error(data.message || "Erreur lors de la soumission des réponses.");
+      }
+    } catch (e: any) {
+      setError(e.message || 'Erreur lors de la soumission des réponses.');
+    } finally {
+      setLoading(false);
+      setIsAwaitingClarification(false);
+      setClarificationQuestions([]);
+      setCurrentConversationId(null);
+      setOriginalUserPrompt(null);
+      setUserAnswers({});
+      setPrompt(""); // Clear the input prompt again
+    }
   };
 
   return (
@@ -374,30 +450,56 @@ function ProjectDetailPage({ project, onBack }: Props) {
               <h3 className="card-title">Discussion avec les agents</h3>
             </div>
             <div className="card-content chat-content">
-              {result && (
+              {result && !isAwaitingClarification && ( // Only show result if not awaiting clarification
                 <div className="agent-message">
                   <div className="agent-icon">🤖</div>
                   <div className="message-content">
-                    <pre>{result.spec || (typeof result === 'object' ? JSON.stringify(result, null, 2) : result)}</pre>
+                    <pre>{(typeof result === 'object' ? JSON.stringify(result, null, 2) : result)}</pre>
                   </div>
                 </div>
               )}
             </div>
             <div className="card-footer">
-              <div className="chat-input-container">
+              {isAwaitingClarification && (
+                <div className="clarification-section mt-3 p-3 border rounded">
+                  <h4 className="text-info">L'IA a besoin de précisions :</h4>
+                  {clarificationQuestions.map((q) => (
+                    <div key={q.question_id} className="mb-2">
+                      <label htmlFor={q.question_id} className="form-label d-block">{q.text}</label>
+                      <input
+                        type="text"
+                        id={q.question_id}
+                        value={userAnswers[q.question_id] || ""}
+                        onChange={(e) => handleAnswerChange(q.question_id, e.target.value)}
+                        className="form-control form-control-sm"
+                        placeholder={`Réponse à ${q.question_id}`}
+                      />
+                    </div>
+                  ))}
+                  <button 
+                    onClick={handleSubmitAnswers} 
+                    disabled={loading} 
+                    className="btn btn-success btn-sm mt-2"
+                  >
+                    {loading ? "Soumission..." : "Envoyer les réponses"}
+                  </button>
+                </div>
+              )}
+              <div className="chat-input-container mt-2">
                 <textarea 
                   value={prompt}
                   onChange={e => setPrompt(e.target.value)}
-                  placeholder="Saisissez votre message (ex: Ajoute une fonctionnalité de recherche, Modifie l'Epic 1...)"
+                  placeholder={isAwaitingClarification ? "Veuillez répondre aux questions ci-dessus." : "Saisissez votre message..."}
                   rows={2}
                   className="chat-input"
+                  disabled={isAwaitingClarification || loading}
                 />
                 <button 
                   onClick={handleGenerate}
-                  disabled={!prompt.trim() || loading}
+                  disabled={!prompt.trim() || loading || isAwaitingClarification}
                   className="btn btn-primary send-button"
                 >
-                  {loading ? "..." : "Envoyer"}
+                  {loading && !isAwaitingClarification ? "..." : "Envoyer"}
                 </button>
               </div>
             </div>
