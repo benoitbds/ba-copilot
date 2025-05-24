@@ -147,6 +147,61 @@
   overflow-x: auto;
 }
 
+/* Styles pour l'affichage des prompts */
+.prompt-details {
+  margin-top: 0.5rem;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.prompt-message {
+  padding: 0.75rem;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.prompt-message:last-child {
+  border-bottom: none;
+}
+
+.prompt-system {
+  background-color: var(--color-bg-tertiary);
+}
+
+.prompt-user {
+  background-color: rgba(var(--color-primary-rgb), 0.1);
+}
+
+.prompt-assistant {
+  background-color: var(--color-bg-secondary);
+}
+
+.prompt-role {
+  font-weight: 600;
+  font-size: 0.7rem;
+  margin-bottom: 0.25rem;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+.prompt-content {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.85rem;
+  margin: 0;
+}
+
+.response-details {
+  padding: 0.75rem;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  background-color: var(--color-bg-tertiary);
+  margin-top: 0.5rem;
+}
+
+.response-details div {
+  margin-bottom: 0.25rem;
+}
+
 .activity-feed-footer {
   padding: 0.75rem 1rem;
   background-color: var(--color-bg);

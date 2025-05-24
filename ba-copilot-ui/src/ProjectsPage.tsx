@@ -14,7 +14,8 @@ function ProjectsPage({ onOpenProject }: Props) {
   const [newProject, setNewProject] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const API_URL = 'http://192.168.1.93:8000';
+  const [confirmDelete, setConfirmDelete] = useState<number | null>(null);
+  const API_URL = import.meta.env.VITE_API_URL || '/api';
 
   useEffect(() => {
     setLoading(true);
@@ -41,6 +42,23 @@ function ProjectsPage({ onOpenProject }: Props) {
       setNewProject('');
     } catch (e: any) {
       setError(e.message || 'Erreur création projet');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDelete = async (projectId: number) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`${API_URL}/projects/${projectId}`, {
+        method: 'DELETE',
+      });
+      if (!res.ok) throw new Error(await res.text());
+      setProjects(projects.filter(p => p.id !== projectId));
+      setConfirmDelete(null);
+    } catch (e: any) {
+      setError(e.message || 'Erreur suppression projet');
     } finally {
       setLoading(false);
     }
@@ -89,12 +107,37 @@ function ProjectsPage({ onOpenProject }: Props) {
                   <span className="card-title">{p.name}</span>
                   <span className="text-tertiary">#{p.id}</span>
                 </div>
-                <button 
-                  onClick={() => onOpenProject(p)} 
-                  className="btn btn-primary"
-                >
-                  Ouvrir
-                </button>
+                <div className="flex gap-2">
+                  <button 
+                    onClick={() => onOpenProject(p)} 
+                    className="btn btn-primary"
+                  >
+                    Ouvrir
+                  </button>
+                  {confirmDelete === p.id ? (
+                    <div className="flex gap-2">
+                      <button 
+                        onClick={() => handleDelete(p.id)} 
+                        className="btn btn-danger"
+                      >
+                        Confirmer
+                      </button>
+                      <button 
+                        onClick={() => setConfirmDelete(null)} 
+                        className="btn"
+                      >
+                        Annuler
+                      </button>
+                    </div>
+                  ) : (
+                    <button 
+                      onClick={() => setConfirmDelete(p.id)} 
+                      className="btn btn-danger"
+                    >
+                      Supprimer
+                    </button>
+                  )}
+                </div>
               </li>
             ))}
           </ul>

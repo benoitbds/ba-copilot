@@ -4,6 +4,7 @@
 :root {
   /* Palette de couleurs - Light Theme */
   --color-primary: #4361ee;
+  --color-primary-rgb: 67, 97, 238;
   --color-primary-hover: #3a56d4;
   --color-primary-light: #edf2ff;
   --color-secondary: #7a86b6;
@@ -228,6 +229,16 @@ h2 {
 .btn-link:hover {
   text-decoration: underline;
   background: transparent;
+}
+
+.btn-danger {
+  background-color: var(--color-error);
+  color: var(--color-text-inverted);
+  border-color: var(--color-error);
+}
+
+.btn-danger:hover {
+  background-color: #dc2626;
 }
 
 .btn-icon {

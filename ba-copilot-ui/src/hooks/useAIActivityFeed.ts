@@ -91,7 +91,7 @@ export const AI_EVENT_TYPES: Record<AIEventType, AIEventTypeMeta> = {
 export const useAIActivityFeed = ({
   sessionId,
   projectId,
-  baseUrl = import.meta.env.VITE_API_URL || 'http://192.168.1.93:8000',
+  baseUrl = import.meta.env.VITE_API_URL || '/api',
   onError
 }: UseAIActivityFeedProps = {}) => {
   const [events, setEvents] = useState<AIEvent[]>([]);

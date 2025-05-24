@@ -223,6 +223,34 @@ const EventItem = React.memo(({
               <summary>Métadonnées</summary>
               <pre>{JSON.stringify(event.event_data, null, 2)}</pre>
             </details>
+            
+            {/* Affichage spécial pour les prompts et full_prompt */}
+            {event.event_type === 'prompt' && event.event_data.full_prompt && (
+              <details className="mt-2">
+                <summary>Prompt complet</summary>
+                <div className="prompt-details">
+                  {event.event_data.full_prompt.map((msg: any, i: number) => (
+                    <div key={i} className={`prompt-message prompt-${msg.role}`}>
+                      <div className="prompt-role">{msg.role}</div>
+                      <pre className="prompt-content">{msg.content}</pre>
+                    </div>
+                  ))}
+                </div>
+              </details>
+            )}
+            
+            {/* Affichage spécial pour les métadonnées de réponse */}
+            {event.event_type === 'response' && event.event_data.response_metadata && (
+              <details className="mt-2">
+                <summary>Détails de la réponse</summary>
+                <div className="response-details">
+                  <div>Modèle: {event.event_data.response_metadata.model}</div>
+                  <div>Tokens prompt: {event.event_data.response_metadata.usage?.prompt_tokens}</div>
+                  <div>Tokens complétion: {event.event_data.response_metadata.usage?.completion_tokens}</div>
+                  <div>Tokens total: {event.event_data.response_metadata.usage?.total_tokens}</div>
+                </div>
+              </details>
+            )}
           </div>
         )}
       </div>

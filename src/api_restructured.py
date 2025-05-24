@@ -37,4 +37,4 @@ except Exception as e:
 # Run the API server
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("api_new:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("src.api_restructured:app", host="0.0.0.0", port=8000, reload=True)

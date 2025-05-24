@@ -47,7 +47,7 @@ function ProjectDetailPage({ project, onBack }: Props) {
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
   const [originalUserPrompt, setOriginalUserPrompt] = useState<string | null>(null); // To store the prompt that started a conversation
   
-  const API_URL = import.meta.env.VITE_API_URL || 'http://192.168.1.93:8000';
+  const API_URL = import.meta.env.VITE_API_URL || '/api';
 
   // Charger le projet et son diagramme au chargement initial
   useEffect(() => {

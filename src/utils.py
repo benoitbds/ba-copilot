@@ -5,9 +5,9 @@ import re # Added for parse_clarification_response
 from typing import Optional, Dict, Any, Union, Callable, List, Literal # Added List, Literal
 from dotenv import load_dotenv
 from sqlalchemy.orm import Session
-import models
-from websocket import AsyncAIActivitySessionManager
-from models import AIEventTypeEnum
+from src import models
+from src.websocket import AsyncAIActivitySessionManager
+from src.models import AIEventTypeEnum
 
 # Load environment variables from .env file if present
 load_dotenv()
@@ -65,29 +65,56 @@ def clarify_prompt_with_agent(
         "Based on the request and context, are there any clarifying questions needed? "
         "If clear, respond 'CLEAR'. Otherwise, list the questions."
     )
+    
+    # Full system and user messages for logging
+    system_prompt = {"role": "system", "content": system_message}
+    user_prompt = {"role": "user", "content": full_prompt_for_clarification}
+    full_prompt = [system_prompt, user_prompt]
 
     # Log start, prompt for clarification agent (if session is available)
     if active_session:
         asyncio.run(active_session.add_event(
             clarification_agent_role, AIEventTypeEnum.START, "Starting clarification phase", {}))
         asyncio.run(active_session.add_event(
-            clarification_agent_role, AIEventTypeEnum.PROMPT, full_prompt_for_clarification, {}))
+            clarification_agent_role, 
+            AIEventTypeEnum.PROMPT, 
+            full_prompt_for_clarification, 
+            {
+                "full_prompt": full_prompt,
+                "system_message": system_message
+            }
+        ))
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o", # Or a faster/cheaper model if suitable for clarification
-            messages=[
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": full_prompt_for_clarification}
-            ],
-            temperature=0.3, # Lower temperature for more deterministic clarification
-            max_tokens=300
-        )
+        # Prepare request parameters
+        request_params = {
+            "model": "gpt-4o", # Or a faster/cheaper model if suitable for clarification
+            "messages": full_prompt,
+            "temperature": 0.3, # Lower temperature for more deterministic clarification
+            "max_tokens": 300
+        }
+        
+        # Make the API call
+        response = client.chat.completions.create(**request_params)
         ai_response_text = response.choices[0].message.content.strip()
 
         if active_session:
             asyncio.run(active_session.add_event(
-                clarification_agent_role, AIEventTypeEnum.RESPONSE, ai_response_text, {}))
+                clarification_agent_role, 
+                AIEventTypeEnum.RESPONSE, 
+                ai_response_text, 
+                {
+                    "request_params": request_params,
+                    "response_metadata": {
+                        "model": response.model,
+                        "usage": {
+                            "prompt_tokens": response.usage.prompt_tokens,
+                            "completion_tokens": response.usage.completion_tokens,
+                            "total_tokens": response.usage.total_tokens
+                        }
+                    }
+                }
+            ))
 
         return parse_clarification_response(ai_response_text)
 
@@ -266,6 +293,11 @@ async def run_agent_async(
     # Prepare the system message with the agent's role
     system_message = f"You are a {role} for requirements engineering. Follow the provided instructions."
     
+    # Full system and user messages for logging
+    system_prompt = {"role": "system", "content": system_message}
+    user_prompt = {"role": "user", "content": prompt}
+    full_prompt = [system_prompt, user_prompt]
+    
     # Create a new activity session if needed
     should_close_session = False
     try:
@@ -298,19 +330,22 @@ async def run_agent_async(
                 role,
                 AIEventTypeEnum.PROMPT,
                 prompt,
-                {"role": role}
+                {
+                    "role": role,
+                    "full_prompt": full_prompt,
+                    "system_message": system_message
+                }
             )
         
         # Make the API call to OpenAI
-        response = await client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.7,
-            max_tokens=2000
-        )
+        request_params = {
+            "model": "gpt-4o",
+            "messages": full_prompt,
+            "temperature": 0.7,
+            "max_tokens": 2000
+        }
+        
+        response = await client.chat.completions.create(**request_params)
         
         # Extract the text response
         result = response.choices[0].message.content
@@ -321,7 +356,18 @@ async def run_agent_async(
                 role,
                 AIEventTypeEnum.RESPONSE,
                 result,
-                {"role": role}
+                {
+                    "role": role,
+                    "request_params": request_params,
+                    "response_metadata": {
+                        "model": response.model,
+                        "usage": {
+                            "prompt_tokens": response.usage.prompt_tokens,
+                            "completion_tokens": response.usage.completion_tokens,
+                            "total_tokens": response.usage.total_tokens
+                        }
+                    }
+                }
             )
             
             # Log completion

@@ -1,9 +1,11 @@
 from sqlalchemy.orm import Session
 from datetime import datetime
-import models
 from typing import List, Optional, Dict, Any, Union
 import uuid
 import json
+
+# Import models and get_db function from src.models
+from src.models import get_db, ElementTypeEnum, StatusEnum, AIEventTypeEnum, Project, Element, Diagram, AIActivitySession, AIEvent
 
 # Fonction helper pour générer un ID unique
 def generate_element_id():
@@ -11,13 +13,13 @@ def generate_element_id():
 
 # Opérations CRUD pour les projets
 def get_projects(db: Session):
-    return db.query(models.Project).all()
+    return db.query(Project).all()
 
 def get_project(db: Session, project_id: int):
-    return db.query(models.Project).filter(models.Project.id == project_id).first()
+    return db.query(Project).filter(Project.id == project_id).first()
 
 def create_project(db: Session, name: str, description: Optional[str] = None):
-    db_project = models.Project(name=name, description=description)
+    db_project = Project(name=name, description=description)
     db.add(db_project)
     db.commit()
     db.refresh(db_project)
@@ -44,35 +46,35 @@ def delete_project(db: Session, project_id: int):
 
 # Opérations CRUD pour les éléments
 def get_element(db: Session, element_id: str):
-    return db.query(models.Element).filter(models.Element.id == element_id).first()
+    return db.query(Element).filter(Element.id == element_id).first()
 
 def get_elements_by_project(db: Session, project_id: int, element_type: Optional[str] = None):
-    query = db.query(models.Element).filter(models.Element.project_id == project_id)
+    query = db.query(Element).filter(Element.project_id == project_id)
     if element_type:
-        query = query.filter(models.Element.type == element_type)
+        query = query.filter(Element.type == element_type)
     return query.all()
 
 def get_root_elements(db: Session, project_id: int):
-    return db.query(models.Element).filter(
-        models.Element.project_id == project_id,
-        models.Element.parent_id == None
+    return db.query(Element).filter(
+        Element.project_id == project_id,
+        Element.parent_id == None
     ).all()
 
 def get_element_children(db: Session, element_id: str):
-    return db.query(models.Element).filter(models.Element.parent_id == element_id).all()
+    return db.query(Element).filter(Element.parent_id == element_id).all()
 
 def create_element(
     db: Session, 
     project_id: int, 
     custom_id: str,
-    element_type: models.ElementTypeEnum,
+    element_type: ElementTypeEnum,
     title: str,
     description: Optional[str] = None,
-    status: models.StatusEnum = models.StatusEnum.PENDING,
+    status: StatusEnum = StatusEnum.PENDING,
     parent_id: Optional[str] = None
 ):
     element_id = generate_element_id()
-    db_element = models.Element(
+    db_element = Element(
         id=element_id,
         custom_id=custom_id,
         type=element_type,
@@ -92,7 +94,7 @@ def update_element(
     element_id: str,
     title: Optional[str] = None,
     description: Optional[str] = None,
-    status: Optional[models.StatusEnum] = None,
+    status: Optional[StatusEnum] = None,
     parent_id: Optional[str] = None
 ):
     db_element = get_element(db, element_id)
@@ -120,7 +122,7 @@ def delete_element(db: Session, element_id: str):
 
 # Opérations pour les diagrammes Mermaid
 def create_diagram(db: Session, project_id: int, mermaid_code: str, objective: Optional[str] = None):
-    db_diagram = models.Diagram(
+    db_diagram = Diagram(
         project_id=project_id,
         mermaid_code=mermaid_code,
         objective=objective
@@ -131,14 +133,14 @@ def create_diagram(db: Session, project_id: int, mermaid_code: str, objective: O
     return db_diagram
 
 def get_latest_diagram(db: Session, project_id: int):
-    return db.query(models.Diagram).filter(
-        models.Diagram.project_id == project_id
-    ).order_by(models.Diagram.created_at.desc()).first()
+    return db.query(Diagram).filter(
+        Diagram.project_id == project_id
+    ).order_by(Diagram.created_at.desc()).first()
 
 def get_project_diagrams(db: Session, project_id: int, limit: int = 5):
-    return db.query(models.Diagram).filter(
-        models.Diagram.project_id == project_id
-    ).order_by(models.Diagram.created_at.desc()).limit(limit).all()
+    return db.query(Diagram).filter(
+        Diagram.project_id == project_id
+    ).order_by(Diagram.created_at.desc()).limit(limit).all()
 
 # Fonction pour construire la structure complète d'un projet
 def get_project_structure(db: Session, project_id: int):
@@ -207,9 +209,9 @@ def process_mermaid_diagram(db: Session, project_id: int, mermaid_code: str, obj
     created_elements = []
     for element in elements:
         # Vérifier si l'élément existe déjà (par custom_id)
-        existing_element = db.query(models.Element).filter(
-            models.Element.project_id == project_id,
-            models.Element.custom_id == element["custom_id"]
+        existing_element = db.query(Element).filter(
+            Element.project_id == project_id,
+            Element.custom_id == element["custom_id"]
         ).first()
         
         if existing_element:
@@ -341,59 +343,66 @@ def create_ai_activity_session(
     action_type: str, 
     project_id: Optional[int] = None, 
     metadata: Optional[Dict[str, Any]] = None
-) -> models.AIActivitySession:
+) -> AIActivitySession:
     """
     Crée une nouvelle session d'activité IA
     """
-    db_session = models.AIActivitySession(
+    db_session = AIActivitySession(
         title=title,
         action_type=action_type,
         project_id=project_id,
         session_data=metadata,  # Utilisation du nouveau nom session_data au lieu de metadata
-        status=models.StatusEnum.IN_PROGRESS
+        status=StatusEnum.IN_PROGRESS
     )
     db.add(db_session)
     db.commit()
     db.refresh(db_session)
     return db_session
 
-def get_ai_activity_session(db: Session, session_id: int) -> Optional[models.AIActivitySession]:
+def get_ai_activity_session(db: Session, session_id: int) -> Optional[AIActivitySession]:
     """
-    Récupère une session d'activité IA par son ID
+    Récupère une session d'activité IA par son ID avec ses événements
     """
-    return db.query(models.AIActivitySession).filter(models.AIActivitySession.id == session_id).first()
+    # Utiliser joinedload pour charger les événements en une seule requête
+    from sqlalchemy.orm import joinedload
+    return db.query(AIActivitySession).options(
+        joinedload(AIActivitySession.events)
+    ).filter(AIActivitySession.id == session_id).first()
 
 def get_ai_activity_sessions(
     db: Session, 
     project_id: Optional[int] = None, 
     action_type: Optional[str] = None,
-    status: Optional[models.StatusEnum] = None,
+    status: Optional[StatusEnum] = None,
     skip: int = 0, 
     limit: int = 100
-) -> List[models.AIActivitySession]:
+) -> List[AIActivitySession]:
     """
     Récupère les sessions d'activité IA, avec filtres optionnels
     """
-    query = db.query(models.AIActivitySession)
+    from sqlalchemy.orm import joinedload
+    query = db.query(AIActivitySession).options(
+        joinedload(AIActivitySession.events)
+    )
     
     if project_id is not None:
-        query = query.filter(models.AIActivitySession.project_id == project_id)
+        query = query.filter(AIActivitySession.project_id == project_id)
     
     if action_type is not None:
-        query = query.filter(models.AIActivitySession.action_type == action_type)
+        query = query.filter(AIActivitySession.action_type == action_type)
     
     if status is not None:
-        query = query.filter(models.AIActivitySession.status == status)
+        query = query.filter(AIActivitySession.status == status)
     
-    return query.order_by(models.AIActivitySession.created_at.desc()).offset(skip).limit(limit).all()
+    return query.order_by(AIActivitySession.created_at.desc()).offset(skip).limit(limit).all()
 
-def complete_ai_activity_session(db: Session, session_id: int) -> Optional[models.AIActivitySession]:
+def complete_ai_activity_session(db: Session, session_id: int) -> Optional[AIActivitySession]:
     """
     Marque une session d'activité IA comme terminée
     """
     db_session = get_ai_activity_session(db, session_id)
     if db_session:
-        db_session.status = models.StatusEnum.COMPLETED
+        db_session.status = StatusEnum.COMPLETED
         db_session.completed_at = datetime.utcnow()
         db.commit()
         db.refresh(db_session)
@@ -403,10 +412,10 @@ def add_ai_event(
     db: Session,
     session_id: int,
     agent_name: str,
-    event_type: models.AIEventTypeEnum,
+    event_type: AIEventTypeEnum,
     content: str,
     metadata: Optional[Dict[str, Any]] = None
-) -> Optional[models.AIEvent]:
+) -> Optional[AIEvent]:
     """
     Ajoute un événement à une session d'activité IA
     """
@@ -416,7 +425,7 @@ def add_ai_event(
         return None
     
     # Créer l'événement
-    db_event = models.AIEvent(
+    db_event = AIEvent(
         session_id=session_id,
         agent_name=agent_name,
         event_type=event_type,
@@ -431,23 +440,23 @@ def add_ai_event(
 def get_ai_events(
     db: Session,
     session_id: int,
-    event_type: Optional[models.AIEventTypeEnum] = None,
+    event_type: Optional[AIEventTypeEnum] = None,
     agent_name: Optional[str] = None,
     skip: int = 0,
     limit: int = 100
-) -> List[models.AIEvent]:
+) -> List[AIEvent]:
     """
     Récupère les événements d'une session d'activité IA
     """
-    query = db.query(models.AIEvent).filter(models.AIEvent.session_id == session_id)
+    query = db.query(AIEvent).filter(AIEvent.session_id == session_id)
     
     if event_type is not None:
-        query = query.filter(models.AIEvent.event_type == event_type)
+        query = query.filter(AIEvent.event_type == event_type)
     
     if agent_name is not None:
-        query = query.filter(models.AIEvent.agent_name == agent_name)
+        query = query.filter(AIEvent.agent_name == agent_name)
     
-    return query.order_by(models.AIEvent.created_at.asc()).offset(skip).limit(limit).all()
+    return query.order_by(AIEvent.created_at.asc()).offset(skip).limit(limit).all()
 
 # Classe pour gérer les sessions d'activité IA avec un context manager
 class AIActivitySessionManager:
@@ -495,7 +504,7 @@ class AIActivitySessionManager:
             if exc_type:
                 self.add_event(
                     "System", 
-                    models.AIEventTypeEnum.ERROR, 
+                    AIEventTypeEnum.ERROR, 
                     f"Erreur: {str(exc_val)}",
                     {"error_type": exc_type.__name__}
                 )
@@ -506,7 +515,7 @@ class AIActivitySessionManager:
     def add_event(
         self, 
         agent_name: str, 
-        event_type: Union[models.AIEventTypeEnum, str], 
+        event_type: Union[AIEventTypeEnum, str], 
         content: str, 
         metadata: Optional[Dict[str, Any]] = None
     ):
@@ -519,9 +528,9 @@ class AIActivitySessionManager:
         # Convertir le type d'événement en enum si c'est une chaîne
         if isinstance(event_type, str):
             try:
-                event_type = models.AIEventTypeEnum(event_type)
+                event_type = AIEventTypeEnum(event_type)
             except ValueError:
-                event_type = models.AIEventTypeEnum.INFO
+                event_type = AIEventTypeEnum.INFO
         
         return add_ai_event(
             self.db,
@@ -560,11 +569,11 @@ def synthesize_project_context(db: Session, project_id: int) -> str:
         context += "\n"
     
     # Organiser les éléments par type
-    epics = [e for e in elements if e.type == models.ElementTypeEnum.EPIC]
-    features = [e for e in elements if e.type == models.ElementTypeEnum.FEATURE]
-    stories = [e for e in elements if e.type == models.ElementTypeEnum.STORY]
-    usecases = [e for e in elements if e.type == models.ElementTypeEnum.USECASE]
-    requirements = [e for e in elements if e.type == models.ElementTypeEnum.REQUIREMENT]
+    epics = [e for e in elements if e.type == ElementTypeEnum.EPIC]
+    features = [e for e in elements if e.type == ElementTypeEnum.FEATURE]
+    stories = [e for e in elements if e.type == ElementTypeEnum.STORY]
+    usecases = [e for e in elements if e.type == ElementTypeEnum.USECASE]
+    requirements = [e for e in elements if e.type == ElementTypeEnum.REQUIREMENT]
     
     # Ajouter les epics
     if epics:

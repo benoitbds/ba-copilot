@@ -5,9 +5,9 @@ from datetime import datetime
 import asyncio
 from sqlalchemy.orm import Session
 
-import models
-import database
-from models import get_db, AIEventTypeEnum
+from src import models
+from src import database
+from src.models import get_db, AIEventTypeEnum
 
 class ConnectionManager:
     """

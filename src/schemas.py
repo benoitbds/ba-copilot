@@ -100,25 +100,46 @@ class NodeUpdate(BaseModel):
     project_id: int
     node: Dict[str, Any]
 
-# Nouveau schéma pour la génération de hiérarchie
-class GenerateHierarchyRequest(BaseModel):
-    project_id: int
+# Schémas pour les agents
+class Agent(BaseModel):
+    name: str
+    description: str
+
+# Schémas pour la génération de hiérarchie
+class HierarchyRequest(BaseModel):
     prompt: str
 
-class FeatureWithStories(BaseModel):
-    id: str
+class Story(BaseModel):
     title: str
     description: Optional[str] = None
-    stories: List[Dict[str, Any]] = []
 
-class EpicWithFeatures(BaseModel):
-    id: str
+class Feature(BaseModel):
     title: str
     description: Optional[str] = None
-    features: List[FeatureWithStories] = []
+    stories: List[Story] = []
+
+class Epic(BaseModel):
+    title: str
+    description: Optional[str] = None
+    features: List[Feature] = []
 
 class HierarchyResponse(BaseModel):
-    epics: List[EpicWithFeatures] = []
+    epics: List[Epic] = []
+
+# Schémas pour la conversation
+class ConversationRequest(BaseModel):
+    project_id: Optional[int] = None
+
+class ConversationResponse(BaseModel):
+    conversation_id: str
+    message: str
+
+class UserMessage(BaseModel):
+    message: str
+
+class AIMessage(BaseModel):
+    message: str
+    conversation_id: str
 
 # Schémas pour l'API d'activité IA
 class AIEventBase(BaseModel):
@@ -128,7 +149,6 @@ class AIEventBase(BaseModel):
     event_data: Optional[Dict[str, Any]] = None  # Renommé de metadata
 
 # Schemas for Conversational AI Flow
-
 class AIClarificationQuestion(BaseModel):
     question_id: str # e.g., "q1", "q2"
     text: str
